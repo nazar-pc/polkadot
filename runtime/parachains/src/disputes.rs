@@ -854,8 +854,10 @@ impl<T: Config> Pallet<T> {
 
 		let mut fresh = Vec::with_capacity(statement_sets.len());
 		for statement_set in statement_sets {
-			let statement_set: DisputeStatementSet = statement_set.into();
-			let dispute_target = (statement_set.session, statement_set.candidate_hash);
+			let dispute_target = {
+				let statement_set: &DisputeStatementSet = statement_set.as_ref();
+				(statement_set.session, statement_set.candidate_hash)
+			};
 			if Self::process_checked_dispute_data(
 				statement_set,
 				config.dispute_post_conclusion_acceptance_period,
@@ -1044,6 +1046,8 @@ impl<T: Config> Pallet<T> {
 		let now = <frame_system::Pallet<T>>::block_number();
 		let oldest_accepted = now.saturating_sub(dispute_post_conclusion_acceptance_period);
 
+		let set = set.as_ref();
+
 		// Load session info to access validators
 		let session_info = match <session_info::Pallet<T>>::session_info(set.session) {
 			Some(s) => s,
@@ -1077,7 +1081,7 @@ impl<T: Config> Pallet<T> {
 		// Import all votes. They were pre-checked.
 		let summary = {
 			let mut importer = DisputeStateImporter::new(dispute_state, now);
-			for (statement, validator_index, _signature) in set.as_ref().statements {
+			for (statement, validator_index, _signature) in &set.statements {
 				let valid = statement.indicates_validity();
 
 				importer.import(*validator_index, valid).map_err(Error::<T>::from)?;
@@ -1093,12 +1097,14 @@ impl<T: Config> Pallet<T> {
 			Error::<T>::SingleSidedDispute,
 		);
 
-		let DisputeStatementSet { session, candidate_hash, .. } = set;
+		let DisputeStatementSet { session, candidate_hash, .. } = set.clone();
 
 		// we can omit spam slot checks, `fn filter_disputes_data` is
 		// always called before calling this `fn`.
 
 		if fresh {
+			let is_local = <Included<T>>::contains_key(&session, &candidate_hash);
+
 			Self::deposit_event(Event::DisputeInitiated(
 				candidate_hash,
 				if is_local { DisputeLocation::Local } else { DisputeLocation::Remote },
@@ -1295,6 +1301,27 @@ mod tests {
 	use frame_system::InitKind;
 	use primitives::v1::BlockNumber;
 	use sp_core::{crypto::CryptoType, Pair};
+
+	/// Filtering updates the spam slots, as such update them.
+	fn update_spam_slots(stmts: MultiDisputeStatementSet) -> CheckedMultiDisputeStatementSet {
+		let config = <configuration::Pallet<Test>>::config();
+		let max_spam_slots = config.dispute_max_spam_slots;
+		let post_conclusion_acceptance_period = config.dispute_post_conclusion_acceptance_period;
+
+		stmts
+			.into_iter()
+			.filter_map(|set| {
+				// updates spam slots implicitly
+				let filter = Pallet::<Test>::filter_dispute_data(
+					&set,
+					post_conclusion_acceptance_period,
+					max_spam_slots,
+					VerifyDisputeSignatures::Skip,
+				);
+				filter.filter_statement_set(set)
+			})
+			.collect::<Vec<_>>()
+	}
 
 	// All arguments for `initializer::on_new_session`
 	type NewSession<'a> = (
@@ -1614,13 +1641,13 @@ mod tests {
 				],
 			}];
 
+			let stmts = update_spam_slots(stmts);
+			assert_eq!(SpamSlots::<Test>::get(start - 1), Some(vec![1, 0, 0, 0, 0, 0, 1]));
+
 			assert_ok!(
-				Pallet::<Test>::process_checked_multi_dispute_data(
-					stmts.into_iter().map(CheckedDisputeStatementSet::from_unchecked).collect()
-				),
+				Pallet::<Test>::process_checked_multi_dispute_data(stmts),
 				vec![(9, candidate_hash.clone())],
 			);
-			assert_eq!(SpamSlots::<Test>::get(start - 1), Some(vec![1, 0, 0, 0, 0, 0, 1]));
 
 			// Run to timeout period
 			run_to_block(start + dispute_conclusion_by_time_out_period, |_| None);
@@ -1998,13 +2025,13 @@ mod tests {
 				],
 			}];
 
+			let stmts = update_spam_slots(stmts);
+			assert_eq!(SpamSlots::<Test>::get(3), Some(vec![1, 0, 1, 0, 0, 0, 0]));
+
 			assert_ok!(
-				Pallet::<Test>::process_checked_multi_dispute_data(
-					stmts.into_iter().map(CheckedDisputeStatementSet::from_unchecked).collect()
-				),
+				Pallet::<Test>::process_checked_multi_dispute_data(stmts),
 				vec![(3, candidate_hash.clone())],
 			);
-			assert_eq!(SpamSlots::<Test>::get(3), Some(vec![1, 0, 1, 0, 0, 0, 0]));
 
 			// v1 votes for 4 and for 3, v6 votes against 4.
 			let stmts = vec![
@@ -2056,10 +2083,10 @@ mod tests {
 				},
 			];
 
+			let stmts = update_spam_slots(stmts);
+
 			assert_ok!(
-				Pallet::<Test>::process_checked_multi_dispute_data(
-					stmts.into_iter().map(CheckedDisputeStatementSet::from_unchecked).collect()
-				),
+				Pallet::<Test>::process_checked_multi_dispute_data(stmts),
 				vec![(4, candidate_hash.clone())],
 			);
 			assert_eq!(SpamSlots::<Test>::get(3), Some(vec![0, 0, 0, 0, 0, 0, 0])); // Confirmed as no longer spam
@@ -2114,10 +2141,10 @@ mod tests {
 					],
 				},
 			];
+
+			let stmts = update_spam_slots(stmts);
 			assert_ok!(
-				Pallet::<Test>::process_checked_multi_dispute_data(
-					stmts.into_iter().map(CheckedDisputeStatementSet::from_unchecked).collect()
-				),
+				Pallet::<Test>::process_checked_multi_dispute_data(stmts),
 				vec![(5, candidate_hash.clone())],
 			);
 			assert_eq!(SpamSlots::<Test>::get(3), Some(vec![0, 0, 0, 0, 0, 0, 0]));
@@ -2159,12 +2186,8 @@ mod tests {
 					)],
 				},
 			];
-			assert_ok!(
-				Pallet::<Test>::process_checked_multi_dispute_data(
-					stmts.into_iter().map(CheckedDisputeStatementSet::from_unchecked).collect()
-				),
-				vec![]
-			);
+			let stmts = update_spam_slots(stmts);
+			assert_ok!(Pallet::<Test>::process_checked_multi_dispute_data(stmts), vec![]);
 			assert_eq!(SpamSlots::<Test>::get(3), Some(vec![0, 0, 0, 0, 0, 0, 0]));
 			assert_eq!(SpamSlots::<Test>::get(4), Some(vec![0, 0, 1, 1, 0, 0, 0]));
 			assert_eq!(SpamSlots::<Test>::get(5), Some(vec![0, 0, 0, 0, 0, 0, 0]));
@@ -2245,12 +2268,8 @@ mod tests {
 					],
 				},
 			];
-			assert_ok!(
-				Pallet::<Test>::process_checked_multi_dispute_data(
-					stmts.into_iter().map(CheckedDisputeStatementSet::from_unchecked).collect()
-				),
-				vec![]
-			);
+			let stmts = update_spam_slots(stmts);
+			assert_ok!(Pallet::<Test>::process_checked_multi_dispute_data(stmts), vec![]);
 
 			assert_eq!(
 				Pallet::<Test>::disputes(),

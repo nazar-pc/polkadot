@@ -40,10 +40,11 @@ use frame_support::{
 use frame_system::pallet_prelude::*;
 use pallet_babe::{self, CurrentBlockRandomness};
 use primitives::v1::{
-	BackedCandidate, CandidateHash, CheckedDisputeStatementSet, CoreIndex, DisputeStatementSet,
+	BackedCandidate, CandidateHash, CandidateReceipt, CheckedDisputeStatementSet,
+	CheckedMultiDisputeStatementSet, CoreIndex, DisputeStatementSet,
 	InherentData as ParachainsInherentData, MultiDisputeStatementSet, ScrapedOnChainVotes,
 	SessionIndex, SigningContext, UncheckedSignedAvailabilityBitfield,
-	UncheckedSignedAvailabilityBitfields, ValidatorId, ValidatorIndex,
+	UncheckedSignedAvailabilityBitfields, ValidatorId, ValidatorIndex, ValidityAttestation,
 	PARACHAINS_INHERENT_IDENTIFIER,
 };
 use rand::{seq::SliceRandom, SeedableRng};
@@ -143,6 +144,47 @@ pub mod pallet {
 	#[pallet::storage]
 	#[pallet::getter(fn on_chain_votes)]
 	pub(crate) type OnChainVotes<T: Config> = StorageValue<_, ScrapedOnChainVotes<T::Hash>>;
+
+	/// Update the disputes statements set part of the on-chain votes.
+	pub(crate) fn set_scrapable_on_chain_disputes<T: Config>(
+		session: SessionIndex,
+		checked_disputes: CheckedMultiDisputeStatementSet,
+	) {
+		crate::paras_inherent::OnChainVotes::<T>::mutate(move |value| {
+			let disputes = checked_disputes.into_iter().map(DisputeStatementSet::from).collect::<Vec<_>>();
+			if let Some(ref mut value) = value {
+				value.disputes = disputes;
+			} else {
+				*value = Some(ScrapedOnChainVotes::<T::Hash> {
+					backing_validators_per_candidate: Vec::new(),
+					disputes,
+					session,
+				});
+			}
+		})
+	}
+
+	/// Update the backing votes including part of the on-chain votes.
+	pub(crate) fn set_scrapable_on_chain_backings<T: Config>(
+		session: SessionIndex,
+		backing_validators_per_candidate: Vec<(
+			CandidateReceipt<T::Hash>,
+			Vec<(ValidatorIndex, ValidityAttestation)>,
+		)>,
+	) {
+		crate::paras_inherent::OnChainVotes::<T>::mutate(move |value| {
+			if let Some(ref mut value) = value {
+				value.backing_validators_per_candidate.clear();
+				value.backing_validators_per_candidate.extend(backing_validators_per_candidate);
+			} else {
+				*value = Some(ScrapedOnChainVotes::<T::Hash> {
+					backing_validators_per_candidate,
+					disputes: MultiDisputeStatementSet::default(),
+					session,
+				});
+			}
+		})
+	}
 
 	#[pallet::hooks]
 	impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
@@ -428,6 +470,9 @@ impl<T: Config> Pallet<T> {
 			<scheduler::Pallet<T>>::core_para,
 			full_check,
 		)?;
+		// any error in the previous function will cause an invalid block and not include
+		// the `DisputeState` to be written to the storage, hence this is ok.
+		set_scrapable_on_chain_disputes::<T>(current_session, checked_disputes.clone());
 
 		// Inform the disputes module of all included candidates.
 		for (_, candidate_hash) in &freed_concluded {
@@ -470,13 +515,10 @@ impl<T: Config> Pallet<T> {
 
 		METRICS.on_disputes_included(checked_disputes.len() as u64);
 
-		// The number of disputes included in a block is
-		// limited by the weight as well as the number of candidate blocks.
-		OnChainVotes::<T>::put(ScrapedOnChainVotes::<<T::Header as HeaderT>::Hash> {
-			session: current_session,
-			backing_validators_per_candidate: candidate_receipt_with_backing_validator_indices,
-			disputes: checked_disputes.into_iter().map(DisputeStatementSet::from).collect(),
-		});
+		set_scrapable_on_chain_backings::<T>(
+			current_session,
+			candidate_receipt_with_backing_validator_indices,
+		);
 
 		// Note which of the scheduled cores were actually occupied by a backed candidate.
 		<scheduler::Pallet<T>>::occupied(&occupied);
@@ -555,11 +597,10 @@ impl<T: Config> Pallet<T> {
 					set,
 					max_spam_slots,
 					post_conclusion_acceptance_period,
-					// A further optimization would be to skip
-					// signature checks here as well, since the
 					// `DisputeCoordinator` on the node side only forwards
-					// valid dispute statement sets.
-					VerifyDisputeSignatures::Yes,
+					// valid dispute statement sets and hence this does not
+					// need to be checked.
+					VerifyDisputeSignatures::Skip,
 				)
 			};
 

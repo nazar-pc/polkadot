@@ -17,7 +17,7 @@
 //! Runtime component for handling disputes of parachain candidates.
 
 use crate::{
-	configuration::{self, HostConfiguration},
+	configuration,
 	initializer::SessionChangeNotification,
 	session_info,
 };
@@ -1287,6 +1287,7 @@ fn check_signature(
 mod tests {
 	use super::*;
 	use crate::{
+		configuration::{self, HostConfiguration},
 		disputes::DisputesHandler,
 		mock::{
 			new_test_ext, AccountId, AllPalletsWithSystem, Initializer, MockGenesisConfig, System,

@@ -151,7 +151,8 @@ pub mod pallet {
 		checked_disputes: CheckedMultiDisputeStatementSet,
 	) {
 		crate::paras_inherent::OnChainVotes::<T>::mutate(move |value| {
-			let disputes = checked_disputes.into_iter().map(DisputeStatementSet::from).collect::<Vec<_>>();
+			let disputes =
+				checked_disputes.into_iter().map(DisputeStatementSet::from).collect::<Vec<_>>();
 			if let Some(ref mut value) = value {
 				value.disputes = disputes;
 			} else {
@@ -403,7 +404,8 @@ impl<T: Config> Pallet<T> {
 			// Note that `process_checked_multi_dispute_data` will iterate and import each
 			// dispute; so the input here must be reasonably bounded.
 			let checked_disputes_count = checked_disputes.len();
-			let _ = T::DisputesHandler::process_checked_multi_dispute_data(checked_disputes.clone())?;
+			let _ =
+				T::DisputesHandler::process_checked_multi_dispute_data(checked_disputes.clone())?;
 			METRICS.on_disputes_imported(checked_disputes_count as u64);
 
 			if T::DisputesHandler::is_frozen() {

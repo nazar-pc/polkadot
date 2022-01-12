@@ -344,20 +344,21 @@ impl<T: Config> Pallet<T> {
 		METRICS.on_before_filter(candidates_weight + bitfields_weight + disputes_weight);
 
 		// Potentially trim inherent data to ensure processing will be within weight limits
+		if candidates_weight
+			.saturating_add(bitfields_weight)
+			.saturating_add(disputes_weight) >
+			max_block_weight
+		{
+			// Don't mess around, this should have been done by the block producer/author:
+			// If the total weight is over the max block weight, first try clearing backed
+			// candidates and bitfields.
+			backed_candidates.clear();
+			signed_bitfields.clear();
+			log::warn!("Overweight block reached the runtime.")
+		}
+
 		// TODO do not fallback to reduction, evict everything and fail the candidate.
 		let (checked_disputes, total_consumed_weight) = {
-			if candidates_weight
-				.saturating_add(bitfields_weight)
-				.saturating_add(disputes_weight) >
-				max_block_weight
-			{
-				// Don't mess around, this should have been done by the block producer/author:
-				// If the total weight is over the max block weight, first try clearing backed
-				// candidates and bitfields.
-				backed_candidates.clear();
-				signed_bitfields.clear();
-			}
-
 			let config = <configuration::Pallet<T>>::config();
 			let max_spam_slots = config.dispute_max_spam_slots;
 			let post_conclusion_acceptance_period =

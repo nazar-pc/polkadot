@@ -337,27 +337,14 @@ impl<T: Config> Pallet<T> {
 			Error::<T>::DisputeStatementsUnsortedOrDuplicates
 		);
 
+		let current_session = <shared::Pallet<T>>::session_index();
+
 		let disputes_weight = multi_dispute_statement_sets_weight::<T, _, _>(&disputes);
 
 		let max_block_weight = <T as frame_system::Config>::BlockWeights::get().max_block;
 
 		METRICS.on_before_filter(candidates_weight + bitfields_weight + disputes_weight);
 
-		// Potentially trim inherent data to ensure processing will be within weight limits
-		if candidates_weight
-			.saturating_add(bitfields_weight)
-			.saturating_add(disputes_weight) >
-			max_block_weight
-		{
-			// Don't mess around, this should have been done by the block producer/author:
-			// If the total weight is over the max block weight, first try clearing backed
-			// candidates and bitfields.
-			backed_candidates.clear();
-			signed_bitfields.clear();
-			log::warn!("Overweight block reached the runtime.")
-		}
-
-		// TODO do not fallback to reduction, evict everything and fail the candidate.
 		let (checked_disputes, total_consumed_weight) = {
 			let config = <configuration::Pallet<T>>::config();
 			let max_spam_slots = config.dispute_max_spam_slots;
@@ -370,30 +357,58 @@ impl<T: Config> Pallet<T> {
 				VerifyDisputeSignatures::Skip
 			};
 
-			let entropy = compute_entropy::<T>(parent_hash);
-			let mut rng = rand_chacha::ChaChaRng::from_seed(entropy.into());
+			let dispute_set_validity_check = move |set| {
+				T::DisputesHandler::filter_dispute_data(
+					set,
+					max_spam_slots,
+					post_conclusion_acceptance_period,
+					verify_dispute_sigs,
+				)
+			};
+			// In case of an overweight block, consume up to the entire block weight
+			// in disputes, since we will never process anything else, but invalidate
+			// the block. It's still reasonable to protect against a massive amount of disputes.
+			if candidates_weight
+				.saturating_add(bitfields_weight)
+				.saturating_add(disputes_weight) >
+				max_block_weight
+			{
+				log::warn!("Overweight para inherent data reached the runtime {}", parent_hash);
+				// Technically this is not necessary, since we bail at the end of the scope
+				// still good for clarity and foot-gun prevention.
+				backed_candidates.clear();
+				signed_bitfields.clear();
 
-			// if disputes are by themselves overweight already, trim the disputes.
-			let (checked_disputes, checked_disputes_weight) = limit_and_sanitize_disputes::<T, _>(
-				disputes,
-				move |set| {
-					T::DisputesHandler::filter_dispute_data(
-						set,
-						max_spam_slots,
-						post_conclusion_acceptance_period,
-						verify_dispute_sigs,
-					)
-				},
-				max_block_weight,
-				&mut rng,
-			);
-			(checked_disputes, checked_disputes_weight)
+				let entropy = compute_entropy::<T>(parent_hash);
+				let mut rng = rand_chacha::ChaChaRng::from_seed(entropy.into());
+
+				// Just in case that disputes are by themselves overweight already, trim the disputes
+				// to not exceed execution time.
+				let (checked_disputes, _checked_disputes_weight) = limit_and_sanitize_disputes::<T, _>(
+					disputes,
+					&dispute_set_validity_check,
+					max_block_weight,
+					&mut rng,
+				);
+				// Process the checked disputes
+				let checked_disputes_count = checked_disputes.len();
+				let _ = T::DisputesHandler::process_checked_multi_dispute_data(
+					checked_disputes.clone(),
+				)?;
+				set_scrapable_on_chain_disputes::<T>(current_session, checked_disputes);
+
+				METRICS.on_disputes_imported(checked_disputes_count as u64);
+
+				Err(Error::<T>::InherentOverweight)
+			} else {
+				// No need to limit, just filter out the invalid ones.
+				Ok(sanitize_disputes::<T, _>(disputes, &dispute_set_validity_check))
+			}?
 		};
 
 		let expected_bits = <scheduler::Pallet<T>>::availability_cores().len();
 
 		// Handle disputes logic.
-		let current_session = <shared::Pallet<T>>::session_index();
 		let disputed_bitfield = {
 			let new_current_dispute_sets: Vec<_> = checked_disputes
 				.iter()
@@ -403,11 +418,11 @@ impl<T: Config> Pallet<T> {
 				.collect();
 
 			// Note that `process_checked_multi_dispute_data` will iterate and import each
-			// dispute; so the input here must be reasonably bounded.
-			let checked_disputes_count = checked_disputes.len();
+			// dispute; so the input here must be reasonably bounded,
+			// which is guaranteed by the checks and weight limitation above.
 			let _ =
 				T::DisputesHandler::process_checked_multi_dispute_data(checked_disputes.clone())?;
-			METRICS.on_disputes_imported(checked_disputes_count as u64);
+			METRICS.on_disputes_imported(checked_disputes.len() as u64);
 
 			if T::DisputesHandler::is_frozen() {
 				// Relay chain freeze, at this point we will not include any parachain blocks.

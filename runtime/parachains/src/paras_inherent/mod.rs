@@ -127,8 +127,10 @@ pub mod pallet {
 		CandidateConcludedInvalid,
 		/// The data given to the inherent will result in an overweight block.
 		InherentOverweight,
-		///
+		/// The ordering of dispute statements was invalid.
 		DisputeStatementsUnsortedOrDuplicates,
+		/// A dispute statement was invalid.
+		DisputeInvalid,
 	}
 
 	/// Whether the paras inherent was included within this block.
@@ -332,11 +334,6 @@ impl<T: Config> Pallet<T> {
 		let candidates_weight = backed_candidates_weight::<T>(&backed_candidates);
 		let bitfields_weight = signed_bitfields_weight::<T>(signed_bitfields.len());
 
-		ensure!(
-			T::DisputesHandler::assure_deduplicated_and_sorted(&disputes).is_ok(),
-			Error::<T>::DisputeStatementsUnsortedOrDuplicates
-		);
-
 		let current_session = <shared::Pallet<T>>::session_index();
 
 		let disputes_weight = multi_dispute_statement_sets_weight::<T, _, _>(&disputes);
@@ -384,6 +381,7 @@ impl<T: Config> Pallet<T> {
 
 				// Just in case that disputes are by themselves overweight already, trim the disputes
 				// to not exceed execution time.
+				// Greedily consume as many as possible.
 				let (checked_disputes, _checked_disputes_weight) =
 					limit_and_sanitize_disputes::<T, _>(
 						disputes,
@@ -400,12 +398,20 @@ impl<T: Config> Pallet<T> {
 
 				METRICS.on_disputes_imported(checked_disputes_count as u64);
 
+				// It would be ok, to call `assure_sanity_disputes` on the original `disputes`, but we bail anyways,
+				// so save those cycles.
+
 				Err(Error::<T>::InherentOverweight)
 			} else {
-				// No need to limit, just filter out the invalid ones.
-				Ok(sanitize_disputes::<T, _>(disputes, &dispute_set_validity_check))
+				// No need to limit, just filter out the invalid ones and return the `CheckedDisputeStatmentSet`s.
+				assure_sanity_disputes::<T, _>(disputes, &dispute_set_validity_check)
 			}?
 		};
+
+		ensure!(
+			T::DisputesHandler::assure_deduplicated_and_sorted(&disputes).is_ok(),
+			Error::<T>::DisputeStatementsUnsortedOrDuplicates
+		);
 
 		let expected_bits = <scheduler::Pallet<T>>::availability_cores().len();
 
@@ -1224,20 +1230,20 @@ fn compute_entropy<T: Config>(parent_hash: T::Hash) -> [u8; 32] {
 ///
 /// Helper to sanitize all disputes in a set, avoid when in doubt
 /// and prefer `limit_and_sanitize_disputes`.
-fn sanitize_disputes<
+fn assure_sanity_disputes<
 	T: Config,
 	CheckValidityFn: FnMut(DisputeStatementSet) -> Option<CheckedDisputeStatementSet>,
 >(
 	disputes: MultiDisputeStatementSet,
 	mut dispute_statement_set_valid: CheckValidityFn,
-) -> (Vec<CheckedDisputeStatementSet>, Weight) {
+) -> Result<(Vec<CheckedDisputeStatementSet>, Weight), Error<T>> {
 	let checked = disputes
 		.into_iter()
-		.filter_map(|dss| dispute_statement_set_valid(dss))
-		.collect::<Vec<CheckedDisputeStatementSet>>();
+		.map(|dss| dispute_statement_set_valid(dss).ok_or(Error::<T>::DisputeInvalid))
+		.collect::<Result<Vec<CheckedDisputeStatementSet>, Error<T>>>()?;
 
 	let checked_disputes_weight = multi_dispute_statement_sets_weight::<T, _, _>(&checked);
-	(checked, checked_disputes_weight)
+	Ok((checked, checked_disputes_weight))
 }
 
 /// Limit disputes in place.
@@ -1340,6 +1346,12 @@ fn limit_and_sanitize_disputes<
 		(checked_acc, weight_acc)
 	} else {
 		// Go through all of them, and just apply the filter, they would all fit
-		sanitize_disputes::<T, _>(disputes, dispute_statement_set_valid)
+		let checked = disputes
+			.into_iter()
+			.filter_map(|dss| dispute_statement_set_valid(dss))
+			.collect::<Vec<CheckedDisputeStatementSet>>();
+		// some might have been filtered out, so re-calc the weight
+		let checked_disputes_weight = multi_dispute_statement_sets_weight::<T, _, _>(&checked);
+		(checked, checked_disputes_weight)
 	}
 }

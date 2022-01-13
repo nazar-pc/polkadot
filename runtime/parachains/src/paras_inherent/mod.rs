@@ -384,12 +384,13 @@ impl<T: Config> Pallet<T> {
 
 				// Just in case that disputes are by themselves overweight already, trim the disputes
 				// to not exceed execution time.
-				let (checked_disputes, _checked_disputes_weight) = limit_and_sanitize_disputes::<T, _>(
-					disputes,
-					&dispute_set_validity_check,
-					max_block_weight,
-					&mut rng,
-				);
+				let (checked_disputes, _checked_disputes_weight) =
+					limit_and_sanitize_disputes::<T, _>(
+						disputes,
+						&dispute_set_validity_check,
+						max_block_weight,
+						&mut rng,
+					);
 				// Process the checked disputes
 				let checked_disputes_count = checked_disputes.len();
 				let _ = T::DisputesHandler::process_checked_multi_dispute_data(

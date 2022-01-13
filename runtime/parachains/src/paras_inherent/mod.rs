@@ -403,15 +403,13 @@ impl<T: Config> Pallet<T> {
 
 				Err(Error::<T>::InherentOverweight)
 			} else {
+				T::DisputesHandler::assure_deduplicated_and_sorted(&disputes)
+					.map_err(|_e| Error::<T>::DisputeStatementsUnsortedOrDuplicates)?;
+
 				// No need to limit, just filter out the invalid ones and return the `CheckedDisputeStatmentSet`s.
 				assure_sanity_disputes::<T, _>(disputes, &dispute_set_validity_check)
 			}?
 		};
-
-		ensure!(
-			T::DisputesHandler::assure_deduplicated_and_sorted(&disputes).is_ok(),
-			Error::<T>::DisputeStatementsUnsortedOrDuplicates
-		);
 
 		let expected_bits = <scheduler::Pallet<T>>::availability_cores().len();
 
